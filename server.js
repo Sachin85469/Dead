@@ -13,6 +13,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '.deadshot-data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(48).toString('hex');
 const rooms = new Map();
+const RECONNECT_WINDOW_MS = 45_000;
 const weapons = {
   rifle: { damage: 34, fireRate: 110, pellets: 1, spread: 0.02, magSize: 30, reserve: 120 },
   sniper: { damage: 78, fireRate: 950, pellets: 1, spread: 0.003, magSize: 5, reserve: 25 },
@@ -33,6 +34,13 @@ const obstacles = [
 app.use(express.json({ limit: '20kb' }));
 app.use(express.static(__dirname, { index: 'index.html' }));
 app.get('/api/health', (_req, res) => res.json({ ok: true, activeRooms: rooms.size }));
+app.get('/api/account/me', (req, res) => {
+  const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const session = sessionUser(token);
+  const user = session && readUsers()[session.email];
+  if (!user) return res.status(401).json({ error: 'Your account session has expired. Please log in again.' });
+  return res.json({ name: user.name });
+});
 
 function readUsers() {
   try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); }
@@ -95,6 +103,10 @@ app.post('/api/account/login', async (req, res) => {
 function cleanName(value) {
   return String(value || 'Operative').replace(/[<>\u0000-\u001f]/g, '').trim().slice(0, 15) || 'Operative';
 }
+function cleanSessionId(value) {
+  const candidate = String(value || '');
+  return /^[A-Za-z0-9_-]{32,64}$/.test(candidate) ? candidate : crypto.randomBytes(16).toString('hex');
+}
 function roomCode() {
   let code;
   do { code = crypto.randomBytes(3).toString('hex').toUpperCase(); } while (rooms.has(code));
@@ -104,8 +116,8 @@ function spawnFor(team) {
   return { x: (Math.random() - 0.5) * 28, y: 1.82, z: team === 'blue' ? 48 : -48 };
 }
 function safePlayer(player) {
-  const { id, name, team, ready, isAlive, health, kills, deaths, weapon, x, y, z, yaw, pitch, score, ammo, reserve, isHost } = player;
-  return { id, name, team, ready, isAlive, health, kills, deaths, weapon, x, y, z, yaw, pitch, score, ammo, reserve, isHost };
+  const { id, name, team, ready, connected, isAlive, health, kills, deaths, weapon, x, y, z, yaw, pitch, score, ammo, reserve, respawnAt, lastKiller, isHost } = player;
+  return { id, name, team, ready, connected, isAlive, health, kills, deaths, weapon, x, y, z, yaw, pitch, score, ammo, reserve, respawnAt, lastKiller, isHost };
 }
 function roomPayload(room) {
   return { code: room.code, phase: room.phase, hostId: room.hostId, blueScore: room.blueScore, redScore: room.redScore,
@@ -117,9 +129,25 @@ function publishRoom(room) {
 }
 function emitError(socket, message) { socket.emit('game:error', { message }); }
 function teamCount(room, team) { return [...room.players.values()].filter(p => p.team === team).length; }
+function findRoomSession(sessionId) {
+  for (const room of rooms.values()) {
+    const player = [...room.players.values()].find(candidate => candidate.sessionId === sessionId);
+    if (player) return { room, player };
+  }
+  return null;
+}
+function removeRoomPlayer(room, id) {
+  room.players.delete(id);
+  if (!room.players.size) { rooms.delete(room.code); return; }
+  if (room.hostId === id) {
+    const next = [...room.players.values()].find(player => player.connected);
+    room.hostId = next ? next.id : null;
+  }
+  publishRoom(room);
+}
 function blockedPosition(x, y, z) {
   if (Math.abs(x) > 80 || Math.abs(z) > 80) return true;
-  return obstacles.some(obstacle => y < obstacle.h + 0.15 &&
+  return obstacles.some(obstacle => y - 1.82 < obstacle.h + 0.15 &&
     x > obstacle.x - obstacle.w / 2 - 0.52 && x < obstacle.x + obstacle.w / 2 + 0.52 &&
     z > obstacle.z - obstacle.d / 2 - 0.52 && z < obstacle.z + obstacle.d / 2 + 0.52);
 }
@@ -137,11 +165,13 @@ function maybeFinish(room) {
 
 io.on('connection', socket => {
   socket.on('room:create', data => {
+    const sessionId = cleanSessionId(data && data.sessionId);
+    if (findRoomSession(sessionId)) return emitError(socket, 'This browser already has a room open. Rejoin it or leave it first.');
     const name = cleanName(data && data.name);
     const team = data && data.team === 'red' ? 'red' : 'blue';
     const account = sessionUser(data && data.token);
     const code = roomCode();
-    const player = { id: socket.id, name: account ? account.name : name, account: account && account.email, team, ready: false,
+    const player = { id: socket.id, sessionId, connected: true, disconnectExpiresAt: 0, name: account ? account.name : name, account: account && account.email, team, ready: false,
       isAlive: true, health: 100, kills: 0, deaths: 0, score: 0, weapon: weapons[data && data.weapon] ? data.weapon : 'rifle',
       x: 0, y: 1.82, z: 0, yaw: team === 'blue' ? Math.PI : 0, pitch: 0, lastMoveAt: Date.now(), lastShotAt: 0,
       ammo: weapons[data && data.weapon] ? weapons[data.weapon].magSize : weapons.rifle.magSize, reserve: weapons[data && data.weapon] ? weapons[data.weapon].reserve : weapons.rifle.reserve, reloadUntil: 0 };
@@ -155,6 +185,9 @@ io.on('connection', socket => {
   });
 
   socket.on('room:join', data => {
+    const sessionId = cleanSessionId(data && data.sessionId);
+    const existingSession = findRoomSession(sessionId);
+    if (existingSession) return emitError(socket, 'This browser already has a room open. Rejoin it or leave it first.');
     const code = String(data && data.code || '').trim().toUpperCase();
     const room = rooms.get(code);
     if (!room) return emitError(socket, 'That room was not found. Check the code and try again.');
@@ -164,13 +197,42 @@ io.on('connection', socket => {
     if (teamCount(room, team) >= 8) return emitError(socket, `${team === 'blue' ? 'Blue' : 'Red'} team is full. Switch teams and try again.`);
     const account = sessionUser(data && data.token);
     const weapon = weapons[data && data.weapon] ? data.weapon : 'rifle';
-    const player = { id: socket.id, name: account ? account.name : cleanName(data && data.name), account: account && account.email, team, ready: false,
+    const player = { id: socket.id, sessionId, connected: true, disconnectExpiresAt: 0, name: account ? account.name : cleanName(data && data.name), account: account && account.email, team, ready: false,
       isAlive: true, health: 100, kills: 0, deaths: 0, score: 0, weapon, ...spawnFor(team), yaw: team === 'blue' ? 0 : Math.PI, pitch: 0,
       lastMoveAt: Date.now(), lastShotAt: 0, ammo: weapons[weapon].magSize, reserve: weapons[weapon].reserve, reloadUntil: 0 };
     room.players.set(socket.id, player);
     socket.data.roomCode = code;
     socket.join(code);
     socket.emit('room:joined', { id: socket.id, code });
+    publishRoom(room);
+  });
+
+  socket.on('room:resume', data => {
+    const code = String(data && data.code || '').trim().toUpperCase();
+    const sessionId = String(data && data.sessionId || '');
+    const room = rooms.get(code);
+    const player = room && [...room.players.values()].find(candidate => candidate.sessionId === sessionId);
+    if (!player || (player.disconnectExpiresAt && player.disconnectExpiresAt <= Date.now())) {
+      socket.emit('room:resume:error', { message: 'That room is no longer available. Create or join another room.' });
+      return;
+    }
+    const previousId = player.id;
+    const previousSocket = io.sockets.sockets.get(previousId);
+    if (previousSocket && previousId !== socket.id) {
+      previousSocket.data.roomCode = null;
+      previousSocket.emit('session:replaced');
+      previousSocket.disconnect(true);
+    }
+    room.players.delete(previousId);
+    player.id = socket.id;
+    player.connected = true;
+    player.disconnectExpiresAt = 0;
+    player.lastMoveAt = Date.now();
+    if (room.hostId === previousId) room.hostId = socket.id;
+    room.players.set(socket.id, player);
+    socket.data.roomCode = code;
+    socket.join(code);
+    socket.emit('room:joined', { id: socket.id, code, resumed: true, phase: room.phase, snapshot: roomPayload(room) });
     publishRoom(room);
   });
 
@@ -199,7 +261,7 @@ io.on('connection', socket => {
     if (!room || room.hostId !== socket.id || room.phase !== 'lobby') return;
     const players = [...room.players.values()];
     if (players.length < 2 || !teamCount(room, 'blue') || !teamCount(room, 'red')) return emitError(socket, 'At least two players must join, with a player on each team.');
-    if (players.some(p => !p.ready)) return emitError(socket, 'Everyone must be ready before the host can start.');
+    if (players.some(p => !p.ready || !p.connected)) return emitError(socket, 'Everyone must be connected and ready before the host can start.');
     room.phase = 'running';
     room.blueScore = 0;
     room.redScore = 0;
@@ -216,7 +278,7 @@ io.on('connection', socket => {
   socket.on('player:state', state => {
     const room = rooms.get(socket.data.roomCode);
     const player = room && room.players.get(socket.id);
-    if (!room || room.phase !== 'running' || !player || !player.isAlive || !state) return;
+    if (!room || room.phase !== 'running' || !player || !player.connected || !player.isAlive || !state) return;
     const x = Number(state.x), y = Number(state.y), z = Number(state.z), yaw = Number(state.yaw), pitch = Number(state.pitch);
     if (![x, y, z, yaw, pitch].every(Number.isFinite) || Math.abs(x) > 82 || Math.abs(z) > 82 || y < 0.8 || y > 4 || blockedPosition(x, y, z)) return;
     const now = Date.now();
@@ -232,7 +294,7 @@ io.on('connection', socket => {
   socket.on('weapon:select', weapon => {
     const room = rooms.get(socket.data.roomCode);
     const player = room && room.players.get(socket.id);
-    if (!room || !player || !weapons[weapon] || (room.phase === 'running' && player.isAlive)) return;
+    if (!room || !player || !player.connected || !weapons[weapon] || (room.phase === 'running' && player.isAlive)) return;
     player.weapon = weapon;
     player.ammo = weapons[weapon].magSize;
     player.reserve = weapons[weapon].reserve;
@@ -242,7 +304,7 @@ io.on('connection', socket => {
   socket.on('weapon:reload', () => {
     const room = rooms.get(socket.data.roomCode);
     const player = room && room.players.get(socket.id);
-    if (!room || !player || !player.isAlive) return;
+    if (!room || !player || !player.connected || !player.isAlive) return;
     const gun = weapons[player.weapon];
     if (player.reloadUntil > Date.now() || player.ammo >= gun.magSize || player.reserve <= 0) return;
     player.reloadUntil = Date.now() + 1100;
@@ -251,7 +313,7 @@ io.on('connection', socket => {
   socket.on('fire:shot', payload => {
     const room = rooms.get(socket.data.roomCode);
     const shooter = room && room.players.get(socket.id);
-    if (!room || room.phase !== 'running' || !shooter || !shooter.isAlive) return;
+    if (!room || room.phase !== 'running' || !shooter || !shooter.connected || !shooter.isAlive) return;
     const gun = weapons[shooter.weapon];
     const now = Date.now();
     if (shooter.reloadUntil > now || now - shooter.lastShotAt < gun.fireRate || shooter.ammo <= 0) return;
@@ -282,7 +344,7 @@ io.on('connection', socket => {
         if (wallDistance !== null) nearestWall = Math.min(nearestWall, wallDistance);
       }
       for (const target of room.players.values()) {
-        if (!target.isAlive || target.team === shooter.team || target.id === shooter.id) continue;
+        if (!target.connected || !target.isAlive || target.team === shooter.team || target.id === shooter.id) continue;
         const box = { min: { x: target.x - 0.38, y: target.y - 1.72, z: target.z - 0.38 }, max: { x: target.x + 0.38, y: target.y - 0.04, z: target.z + 0.38 } };
         const dist = rayBoxDistance(origin, dir, box);
         if (dist !== null && dist < closest && dist < nearestWall) {
@@ -308,17 +370,30 @@ io.on('connection', socket => {
   });
 
   socket.on('room:leave', () => leaveRoom(socket));
-  socket.on('disconnect', () => leaveRoom(socket));
+  socket.on('disconnect', () => disconnectFromRoom(socket));
 
   function leaveRoom(currentSocket) {
     const code = currentSocket.data.roomCode;
     const room = rooms.get(code);
     if (!room || !room.players.has(currentSocket.id)) return;
-    room.players.delete(currentSocket.id);
     currentSocket.leave(code);
     currentSocket.data.roomCode = null;
-    if (!room.players.size) { rooms.delete(code); return; }
-    if (room.hostId === currentSocket.id) room.hostId = room.players.keys().next().value;
+    removeRoomPlayer(room, currentSocket.id);
+  }
+
+  function disconnectFromRoom(currentSocket) {
+    const code = currentSocket.data.roomCode;
+    const room = rooms.get(code);
+    const player = room && room.players.get(currentSocket.id);
+    if (!room || !player) return;
+    currentSocket.data.roomCode = null;
+    player.connected = false;
+    player.disconnectExpiresAt = Date.now() + RECONNECT_WINDOW_MS;
+    if (room.phase === 'running' && player.isAlive) {
+      player.isAlive = false;
+      player.health = 0;
+      player.respawnAt = Date.now();
+    }
     publishRoom(room);
   }
 });
@@ -347,6 +422,7 @@ function eliminate(room, killer, victim, headshot) {
   victim.health = 0;
   victim.deaths++;
   victim.respawnAt = Date.now() + 3500;
+  victim.lastKiller = killer.name;
   killer.kills++;
   killer.score += headshot ? 150 : 100;
   if (killer.team === 'blue') room.blueScore++;
@@ -354,28 +430,29 @@ function eliminate(room, killer, victim, headshot) {
   io.to(victim.id).emit('player:eliminated', { killer: killer.name, respawnAt: victim.respawnAt });
   io.to(room.code).emit('game:kill', { killer: killer.name, killerTeam: killer.team, victim: victim.name, weapon: killer.weapon, headshot, blueScore: room.blueScore, redScore: room.redScore });
   publishRoom(room);
-  setTimeout(() => {
-    const current = rooms.get(room.code);
-    const player = current && current.players.get(victim.id);
-    if (!player || player.isAlive || current.phase !== 'running') return;
-    placePlayer(player);
-    player.ammo = weapons[player.weapon].magSize;
-    player.reserve = weapons[player.weapon].reserve;
-    io.to(player.id).emit('player:respawned', { x: player.x, y: player.y, z: player.z, yaw: player.yaw, weapon: player.weapon });
-    publishRoom(current);
-  }, 3500);
 }
 
 setInterval(() => {
   for (const room of rooms.values()) {
     const now = Date.now();
-    for (const player of room.players.values()) {
+    for (const [id, player] of room.players) {
+      if (!player.connected && player.disconnectExpiresAt <= now) {
+        removeRoomPlayer(room, id);
+        continue;
+      }
       if (player.reloadUntil && player.reloadUntil <= now) {
         const gun = weapons[player.weapon];
         const amount = Math.min(gun.magSize - player.ammo, player.reserve);
         player.ammo += amount; player.reserve -= amount; player.reloadUntil = 0;
       }
+      if (room.phase === 'running' && !player.isAlive && player.respawnAt > 0 && player.respawnAt <= now) {
+        placePlayer(player);
+        player.ammo = weapons[player.weapon].magSize;
+        player.reserve = weapons[player.weapon].reserve;
+        if (player.connected) io.to(player.id).emit('player:respawned', { x: player.x, y: player.y, z: player.z, yaw: player.yaw, weapon: player.weapon });
+      }
     }
+    if (!rooms.has(room.code)) continue;
     if (room.phase === 'running' && room.endsAt <= now) maybeFinish(room);
     if (room.phase === 'running') publishRoom(room);
     if (room.phase === 'finished' && now - room.finishedAt > 5 * 60 * 1000 && room.players.size === 0) rooms.delete(room.code);
@@ -383,4 +460,3 @@ setInterval(() => {
 }, 100);
 
 server.listen(PORT, '0.0.0.0', () => console.log(`Deadshot multiplayer server listening on ${PORT}`));
-

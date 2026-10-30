@@ -3,4 +3,3 @@
   "build": { "builder": "RAILPACK", "buildCommand": "npm install" },
   "deploy": { "startCommand": "npm start", "healthcheckPath": "/api/health", "healthcheckTimeout": 120, "restartPolicyType": "ON_FAILURE" }
 }
-

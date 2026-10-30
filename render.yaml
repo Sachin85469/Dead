@@ -15,4 +15,3 @@ services:
         value: /var/data
       - key: SESSION_SECRET
         generateValue: true
-

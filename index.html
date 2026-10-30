@@ -128,7 +128,7 @@
           <input id="accountPassword" type="password" autocomplete="current-password" placeholder="Password (8+ characters)" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400" />
           <div class="flex gap-2"><button onclick="accountAction('login')" class="flex-1 rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-xs font-bold">LOG IN</button><button onclick="accountAction('register')" class="flex-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 px-3 py-2 text-xs font-bold">CREATE</button></div>
         </div>
-        <div id="accountMessage" class="mt-2 text-xs text-slate-400" aria-live="polite"></div>
+        <div class="flex items-center justify-between gap-3 mt-2"><div id="accountMessage" class="text-xs text-slate-400" aria-live="polite"></div><button id="accountSignout" onclick="signOut()" class="hidden text-xs font-bold text-rose-300 hover:text-rose-200">SIGN OUT</button></div>
       </div>
 
       <!-- Action Buttons -->
@@ -174,6 +174,7 @@
         <section class="rounded-2xl border border-sky-500/30 bg-sky-950/20 p-4"><h3 class="font-chakra font-bold text-sky-300 mb-3">BLUE TEAM <span id="blueCount" class="text-slate-400"></span></h3><div id="blueRoster" class="space-y-2 min-h-14"></div></section>
         <section class="rounded-2xl border border-rose-500/30 bg-rose-950/20 p-4"><h3 class="font-chakra font-bold text-rose-300 mb-3">RED TEAM <span id="redCount" class="text-slate-400"></span></h3><div id="redRoster" class="space-y-2 min-h-14"></div></section>
       </div>
+      <div class="mb-5"><h3 class="font-chakra font-bold text-slate-300 text-xs uppercase tracking-wider mb-2">Choose your weapon</h3><div id="roomWeaponList" class="grid grid-cols-4 gap-2"></div></div>
       <div class="flex flex-col sm:flex-row gap-3">
         <button id="roomTeamButton" onclick="cycleRoomTeam()" class="sm:w-48 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-chakra font-bold">SWITCH TEAM</button>
         <button id="readyButton" onclick="toggleReady()" class="flex-1 py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-chakra font-black tracking-wide">READY UP</button>
@@ -273,7 +274,7 @@
       </div>
       <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono-tech mt-1.5 px-1">
         <span id="hudRoomLabel">ROOM: ------</span>
-        <span class="text-emerald-400">ONLINE</span>
+        <span id="hudConnectionState" class="text-slate-400">CONNECTING</span>
       </div>
     </div>
 
@@ -869,6 +870,15 @@
     /* ==============================================================
        4. GLOBAL STATE & KINEMATICS
        ============================================================== */
+    function getRoomSessionId() {
+      let id = sessionStorage.getItem('deadshot-session-id');
+      if (!id) {
+        id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
+        sessionStorage.setItem('deadshot-session-id', id);
+      }
+      return id;
+    }
+
     const state = {
       running: false,
       playerName: 'Specter_7',
@@ -883,7 +893,8 @@
       redScore: 0,
       matchTimeRemaining: 600, // 10 minutes
       matchEnded: false,
-      roomCode: '',
+      roomCode: sessionStorage.getItem('deadshot-room-code') || '',
+      sessionId: getRoomSessionId(),
       socket: null,
       myId: null,
       isHost: false,
@@ -1306,6 +1317,7 @@
       document.getElementById('hudGunName').textContent = w.name;
       document.getElementById('hudGunIcon').className = `ph-bold ${w.icon}`;
       if (state.socket && state.roomCode && !state.suppressWeaponEmit) state.socket.emit('weapon:select', weaponId);
+      if (typeof populateWeaponLoadoutCards === 'function') populateWeaponLoadoutCards();
     }
 
     /* ==============================================================
@@ -1816,7 +1828,7 @@
       }
     }
 
-    function triggerPlayerDeath(killer) {
+    function triggerPlayerDeath(killer, respawnAt) {
       if (!document.getElementById('respawnModal').classList.contains('hidden')) return;
       state.health = 0;
       updateHealthDisplay();
@@ -1833,15 +1845,15 @@
       document.getElementById('respawnInfoText').textContent = `Eliminated by ${killer}`;
       modal.classList.remove('hidden');
 
-      let timerVal = 3.5;
-      document.getElementById('respawnCountdown').textContent = timerVal.toFixed(1);
+      const deadline = Number(respawnAt) || (Date.now() + 3500);
+      document.getElementById('respawnCountdown').textContent = Math.max(0, (deadline - Date.now()) / 1000).toFixed(1);
       const interval = setInterval(() => {
-        timerVal -= 0.5;
-        document.getElementById('respawnCountdown').textContent = Math.max(0, timerVal).toFixed(1);
-        if (timerVal <= 0) {
+        const remaining = Math.max(0, (deadline - Date.now()) / 1000);
+        document.getElementById('respawnCountdown').textContent = remaining.toFixed(1);
+        if (remaining <= 0) {
           clearInterval(interval);
         }
-      }, 500);
+      }, 100);
     }
 
     function respawnPlayer(position) {
@@ -2090,8 +2102,10 @@
     function populateWeaponLoadoutCards() {
       const lobbyList = document.getElementById('lobbyWeaponList');
       const respawnList = document.getElementById('respawnWeaponList');
+      const roomList = document.getElementById('roomWeaponList');
       if (lobbyList) lobbyList.innerHTML = '';
       if (respawnList) respawnList.innerHTML = '';
+      if (roomList) roomList.innerHTML = '';
 
       Object.values(WEAPONS).forEach(w => {
         const isSel = state.activeGunId === w.id;
@@ -2117,13 +2131,14 @@
 
         if (lobbyList) lobbyList.appendChild(createCard());
         if (respawnList) respawnList.appendChild(createCard());
+        if (roomList) roomList.appendChild(createCard());
       });
     }
 
     function lobbyIdentity() {
       const name = document.getElementById('playerNameInput').value.trim();
       state.playerName = name || `Rookie_${Math.floor(100 + Math.random() * 900)}`;
-      return { name: state.playerName, team: state.playerTeam, weapon: state.activeGunId, token: state.sessionToken };
+      return { name: state.playerName, team: state.playerTeam, weapon: state.activeGunId, token: state.sessionToken, sessionId: state.sessionId };
     }
 
     function createRoom() {
@@ -2167,6 +2182,7 @@
         localStorage.setItem('deadshot-session', result.token);
         document.getElementById('playerNameInput').value = result.name;
         document.getElementById('accountButton').textContent = 'ACCOUNT ✓';
+        document.getElementById('accountSignout').classList.remove('hidden');
         message.textContent = 'Account ready. Your name will be saved when you join a room.';
         document.getElementById('accountPassword').value = '';
       } catch (error) {
@@ -2174,8 +2190,17 @@
       }
     }
 
+    function signOut() {
+      state.sessionToken = '';
+      localStorage.removeItem('deadshot-session');
+      document.getElementById('accountButton').textContent = 'GUEST PLAY';
+      document.getElementById('accountSignout').classList.add('hidden');
+      document.getElementById('accountMessage').textContent = 'Signed out. You can continue as a guest.';
+    }
+
     function leaveRoom() {
       if (state.socket) state.socket.emit('room:leave');
+      sessionStorage.removeItem('deadshot-room-code');
       document.getElementById('roomLobby').classList.add('hidden');
       document.getElementById('roomLobby').classList.remove('flex');
       document.getElementById('lobbyScreen').classList.remove('hidden');
@@ -2224,8 +2249,8 @@
           playerName.className = 'truncate text-slate-200';
           playerName.textContent = `${player.name}${player.isHost ? ' · HOST' : ''}${player.id === state.myId ? ' · YOU' : ''}`;
           const ready = document.createElement('span');
-          ready.className = player.ready ? 'text-emerald-400 text-xs font-bold' : 'text-slate-500 text-xs';
-          ready.textContent = player.ready ? 'READY' : 'NOT READY';
+          ready.className = !player.connected ? 'text-amber-300 text-xs font-bold' : player.ready ? 'text-emerald-400 text-xs font-bold' : 'text-slate-500 text-xs';
+          ready.textContent = !player.connected ? 'RECONNECTING' : player.ready ? 'READY' : 'NOT READY';
           row.append(playerName, ready);
           roster.appendChild(row);
         });
@@ -2280,7 +2305,7 @@
         player.weapon = data.weapon;
         player.targetPosition = new THREE.Vector3(data.x, 0, data.z);
         player.targetYaw = data.yaw;
-        player.mesh.visible = data.isAlive;
+        player.mesh.visible = data.isAlive && data.connected !== false;
         if (!data.isAlive) player.mesh.rotation.x = -Math.PI / 2.2;
         else player.mesh.rotation.x = 0;
       }
@@ -2301,9 +2326,9 @@
       document.getElementById('readyButton').classList.toggle('bg-amber-400', state.ready);
       document.getElementById('roomTeamButton').textContent = `SWITCH TO ${state.playerTeam === 'blue' ? 'RED' : 'BLUE'}`;
       document.getElementById('roomStatusText').textContent = room.phase === 'running' ? 'Match in progress.' : 'Share the code. The host starts once everyone is ready.';
-      renderRoomRoster(room.players);
+      if (room.phase === 'lobby' && !document.getElementById('roomLobby').classList.contains('hidden')) renderRoomRoster(room.players);
       const hasBothTeams = room.players.some(p => p.team === 'blue') && room.players.some(p => p.team === 'red');
-      const canStart = room.players.length >= 2 && hasBothTeams && room.players.every(p => p.ready);
+      const canStart = room.players.length >= 2 && hasBothTeams && room.players.every(p => p.ready && p.connected !== false);
       const startButton = document.getElementById('startRoomButton');
       startButton.classList.toggle('hidden', !state.isHost || room.phase !== 'lobby');
       startButton.disabled = !canStart;
@@ -2312,7 +2337,7 @@
       if (!document.getElementById('scoreboardModal').classList.contains('hidden')) renderScoreboard();
     }
 
-    function enterMatch(room) {
+    function enterMatch(room, isResume = false) {
       applyRoomSnapshot(room);
       sound.init();
       const me = room.players.find(player => player.id === state.myId);
@@ -2321,10 +2346,12 @@
         euler.set(0, me.yaw, 0, 'YXZ');
         camera.quaternion.setFromEuler(euler);
       }
-      state.health = 100;
-      state.kills = 0;
-      state.deaths = 0;
-      state.score = 0;
+      state.health = me ? me.health : 100;
+      if (!isResume) {
+        state.kills = me ? me.kills : 0;
+        state.deaths = me ? me.deaths : 0;
+        state.score = me ? me.score : 0;
+      }
       state.matchEnded = false;
       state.running = true;
       state.velocity.set(0, 0, 0);
@@ -2341,14 +2368,55 @@
 
     function initNetwork() {
       state.socket = io();
-      state.socket.on('connect', () => showLobbyMessage('Game server connected. Create a room or enter a room code.'));
+      const setConnectionState = connected => {
+        const label = document.getElementById('hudConnectionState');
+        label.textContent = connected ? 'ONLINE' : 'RECONNECTING';
+        label.className = connected ? 'text-emerald-400' : 'text-amber-300';
+      };
+      state.socket.on('connect', () => {
+        setConnectionState(true);
+        const savedCode = sessionStorage.getItem('deadshot-room-code');
+        if (savedCode) state.socket.emit('room:resume', { code: savedCode, sessionId: state.sessionId });
+        else showLobbyMessage('Game server connected. Create a room or enter a room code.');
+      });
       state.socket.on('disconnect', () => {
+        setConnectionState(false);
         if (state.roomCode && state.roomPhase !== 'lobby') showRoomMessage('Connection lost. Reconnecting to the game server…');
         else showLobbyMessage('Connection lost. Reconnecting to the game server…');
       });
       state.socket.on('room:joined', data => {
         state.myId = data.id;
         state.roomCode = data.code;
+        sessionStorage.setItem('deadshot-room-code', data.code);
+        if (data.resumed && data.snapshot) {
+          if (data.phase === 'running') {
+            if (!state.running) enterMatch(data.snapshot, true);
+            else applyRoomSnapshot(data.snapshot);
+            const me = data.snapshot.players.find(player => player.id === state.myId);
+            if (me) {
+              cameraHolder.position.set(me.x, me.y, me.z);
+              euler.set(0, me.yaw, 0, 'YXZ');
+              camera.quaternion.setFromEuler(euler);
+              state.velocity.set(0, 0, 0);
+              if (me.isAlive) document.getElementById('respawnModal').classList.add('hidden');
+              else triggerPlayerDeath(me.lastKiller || 'combat', me.respawnAt);
+            }
+          } else if (data.phase === 'finished') {
+            applyRoomSnapshot(data.snapshot);
+            state.running = false;
+            document.getElementById('lobbyScreen').classList.add('hidden');
+            document.getElementById('roomLobby').classList.add('hidden');
+            document.getElementById('gameHUD').classList.remove('hidden');
+            finishMatch();
+          } else {
+            document.getElementById('lobbyScreen').classList.add('hidden');
+            document.getElementById('roomLobby').classList.remove('hidden');
+            document.getElementById('roomLobby').classList.add('flex');
+            applyRoomSnapshot(data.snapshot);
+          }
+          showRoomMessage('Connection restored.');
+          return;
+        }
         showLobbyMessage('');
         showRoomMessage('');
         document.getElementById('lobbyScreen').classList.add('hidden');
@@ -2356,7 +2424,18 @@
         document.getElementById('roomLobby').classList.add('flex');
       });
       state.socket.on('room:update', applyRoomSnapshot);
-      state.socket.on('game:started', enterMatch);
+      state.socket.on('game:started', room => enterMatch(room, false));
+      state.socket.on('room:resume:error', data => {
+        sessionStorage.removeItem('deadshot-room-code');
+        state.roomCode = '';
+        state.running = false;
+        state.roomPhase = 'lobby';
+        document.getElementById('roomLobby').classList.add('hidden');
+        document.getElementById('roomLobby').classList.remove('flex');
+        document.getElementById('gameHUD').classList.add('hidden');
+        document.getElementById('lobbyScreen').classList.remove('hidden');
+        showLobbyMessage(data && data.message || 'The previous room could not be restored. Join another room.');
+      });
       state.socket.on('game:error', data => {
         const message = data && data.message || 'The game server rejected that action.';
         if (document.getElementById('roomLobby').classList.contains('hidden')) showLobbyMessage(message);
@@ -2368,9 +2447,9 @@
         const overlay = document.getElementById('damageOverlay');
         overlay.style.backgroundColor = 'rgba(220, 38, 38, 0.45)';
         setTimeout(() => { overlay.style.backgroundColor = 'rgba(220, 38, 38, 0)'; }, 140);
-        if (state.health <= 0) triggerPlayerDeath(data.from);
+        if (state.health <= 0) state.health = 0;
       });
-      state.socket.on('player:eliminated', data => triggerPlayerDeath(data.killer));
+      state.socket.on('player:eliminated', data => triggerPlayerDeath(data.killer, data.respawnAt));
       state.socket.on('player:respawned', data => respawnPlayer(data));
       state.socket.on('shot:result', data => { if (data && data.hit) showHitIndicator(Boolean(data.headshot)); });
       state.socket.on('player:shot', data => {
@@ -2683,10 +2762,16 @@
       initControls();
       initNetwork();
       populateWeaponLoadoutCards();
-      if (state.sessionToken) document.getElementById('accountButton').textContent = 'ACCOUNT ✓';
+      if (state.sessionToken) {
+        document.getElementById('accountButton').textContent = 'ACCOUNT ✓';
+        document.getElementById('accountSignout').classList.remove('hidden');
+        fetch('/api/account/me', { headers: { Authorization: `Bearer ${state.sessionToken}` } })
+          .then(response => response.ok ? response.json() : Promise.reject(new Error('expired')))
+          .then(account => { document.getElementById('playerNameInput').value = account.name; })
+          .catch(() => signOut());
+      }
       gameLoop();
     };
   </script>
 </body>
 </html>
-
