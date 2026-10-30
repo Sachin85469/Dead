@@ -1,0 +1,19 @@
+{
+  "name": "deadshot-3d",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Browser based 3D team deathmatch with real-time private rooms",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  }
+}
+
