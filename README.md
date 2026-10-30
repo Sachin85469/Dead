@@ -50,3 +50,4 @@ Guest play needs no account. Optional accounts use email and password; passwords
 - **Mouse** aim and fire, **right mouse** aim down sights
 - **R** reload, **1–4** choose rifle / sniper / shotgun / SMG
 - **Tab** scoreboard
+- **Phone** left pad to move, drag the right side to look, and use FIRE / AIM / JUMP / RELOAD buttons

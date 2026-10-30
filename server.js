@@ -113,7 +113,11 @@ function roomCode() {
   return code;
 }
 function spawnFor(team) {
-  return { x: (Math.random() - 0.5) * 28, y: 1.82, z: team === 'blue' ? 48 : -48 };
+  // Keep both teams in the same clear firing lane so the opponent stays in
+  // view on narrow phone screens; a small spread prevents players stacking.
+  const x = 7 + (Math.random() - 0.5) * 3;
+  const depth = 47 + Math.random() * 3;
+  return { x, y: 1.82, z: team === 'blue' ? depth : -depth };
 }
 function safePlayer(player) {
   const { id, name, team, ready, connected, isAlive, health, kills, deaths, weapon, x, y, z, yaw, pitch, score, ammo, reserve, respawnAt, lastKiller, isHost } = player;

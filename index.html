@@ -39,6 +39,10 @@
       display: block;
     }
 
+    #mobileControls, #mobileLookZone, #mobileJoystickBase, #mobileFire, #mobileAim, #mobileJump, #mobileReload {
+      touch-action: none;
+    }
+
     /* Sniper Optical Scope Simulation */
     .sniper-scope-view {
       background: radial-gradient(circle at center, transparent 32%, rgba(0,0,0,0.92) 34%, black 38%, black 100%);
@@ -364,6 +368,26 @@
 
     <!-- Damage Flash Vignette -->
     <div id="damageOverlay" class="absolute inset-0 bg-red-600/0 pointer-events-none transition-all duration-150"></div>
+  </div>
+
+  <!-- Touch controls for phones: drag the right side to look, hold the pad to move. -->
+  <div id="mobileControls" class="hidden fixed inset-0 z-[35] pointer-events-none">
+    <div id="mobileLookZone" class="absolute left-[34%] right-0 top-[18%] bottom-[28%] pointer-events-auto"></div>
+    <div id="mobileJoystickBase" class="absolute left-[5%] bottom-[7%] w-32 h-32 rounded-full border-2 border-white/35 bg-slate-900/35 backdrop-blur-sm pointer-events-auto flex items-center justify-center">
+      <div class="absolute inset-3 rounded-full border border-white/15"></div>
+      <div id="mobileJoystickStick" class="relative w-14 h-14 rounded-full border-2 border-cyan-200/70 bg-cyan-500/35 shadow-lg shadow-cyan-500/20"></div>
+    </div>
+    <div class="absolute right-[5%] bottom-[7%] flex items-end gap-3 pointer-events-auto">
+      <div class="flex flex-col gap-3 pb-1">
+        <button id="mobileAim" class="w-14 h-14 rounded-full border border-cyan-300/60 bg-slate-900/75 text-cyan-200 text-[10px] font-black shadow-lg">AIM</button>
+        <button id="mobileReload" class="w-14 h-14 rounded-full border border-slate-300/40 bg-slate-900/75 text-white text-[10px] font-black shadow-lg">RELOAD</button>
+      </div>
+      <div class="flex flex-col items-center gap-3">
+        <button id="mobileJump" class="w-14 h-14 rounded-full border border-white/40 bg-slate-900/75 text-white text-[10px] font-black shadow-lg">JUMP</button>
+        <button id="mobileFire" class="w-20 h-20 rounded-full border-2 border-rose-200/80 bg-rose-600/65 text-white text-xs font-black tracking-wider shadow-lg shadow-rose-600/30">FIRE</button>
+      </div>
+    </div>
+    <div class="absolute top-24 left-1/2 -translate-x-1/2 rounded-full border border-white/15 bg-slate-950/45 px-3 py-1 text-[10px] font-bold tracking-wider text-white/80 pointer-events-none">DRAG TO LOOK</div>
   </div>
 
   <!-- ================= RESPAWN & LOADOUT MODAL ================= -->
@@ -910,6 +934,7 @@
       isReloading: false,
       isAiming: false,
       aimProgress: 0, // 0 to 1 smooth ADS interpolation
+      touchFiring: false,
 
       // Settings
       mouseSensitivity: 0.002,
@@ -945,13 +970,23 @@
     let cameraHolder, fpsGunGroup, cameraTiltGroup, muzzleFlashLight;
     let clock = new THREE.Clock();
 
+    function isTouchDevice() {
+      return Boolean(navigator.maxTouchPoints || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches));
+    }
+
+    function effectiveBaseFov() {
+      if (!isTouchDevice()) return state.baseFov;
+      const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+      return Math.max(state.baseFov, aspect < 0.85 ? 95 : 82);
+    }
+
     function initScene() {
       const canvas = document.getElementById('gameCanvas');
       scene = new THREE.Scene();
       scene.background = new THREE.Color(0x0a0d14);
-      scene.fog = new THREE.FogExp2(0x0a0d14, 0.012);
+      scene.fog = new THREE.FogExp2(0x0a0d14, 0.007);
 
-      camera = new THREE.PerspectiveCamera(state.baseFov, window.innerWidth / window.innerHeight, 0.05, 1000);
+      camera = new THREE.PerspectiveCamera(effectiveBaseFov(), window.innerWidth / window.innerHeight, 0.05, 1000);
       
       cameraHolder = new THREE.Group();
       cameraHolder.position.set(0, state.playerHeight, 35);
@@ -1589,6 +1624,25 @@
     let euler = new THREE.Euler(0, 0, 0, 'YXZ');
     const PI_2 = Math.PI / 2;
 
+    function rotateCameraBy(dx, dy, sensitivity) {
+      euler.setFromQuaternion(camera.quaternion, 'YXZ');
+      euler.y -= dx * sensitivity;
+      euler.x -= dy * sensitivity;
+      euler.x = Math.max(-PI_2 + 0.02, Math.min(PI_2 - 0.02, euler.x));
+      camera.quaternion.setFromEuler(euler);
+
+      let deg = Math.round((-euler.y * 180 / Math.PI) % 360);
+      if (deg < 0) deg += 360;
+      document.getElementById('hudCompassAngle').textContent = `${deg < 10 ? '00' : (deg < 100 ? '0' : '')}${deg}°`;
+      const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+      document.getElementById('hudCompassDirection').textContent = dirs[Math.round(deg / 45) % 8];
+    }
+
+    function setMobileControlsVisible(visible) {
+      const controls = document.getElementById('mobileControls');
+      if (controls) controls.classList.toggle('hidden', !visible || !isTouchDevice());
+    }
+
     function initControls() {
       const canvas = document.getElementById('gameCanvas');
 
@@ -1650,19 +1704,7 @@
         if (document.pointerLockElement !== canvas) return;
 
         const sens = state.isAiming ? state.mouseSensitivity * 0.45 : state.mouseSensitivity;
-        euler.setFromQuaternion(camera.quaternion);
-        euler.y -= e.movementX * sens;
-        euler.x -= e.movementY * sens;
-        euler.x = Math.max(-PI_2 + 0.02, Math.min(PI_2 - 0.02, euler.x));
-        camera.quaternion.setFromEuler(euler);
-
-        // Update top compass bar
-        let deg = Math.round((-euler.y * 180 / Math.PI) % 360);
-        if (deg < 0) deg += 360;
-        document.getElementById('hudCompassAngle').textContent = `${deg < 10 ? '00' : (deg < 100 ? '0' : '')}${deg}°`;
-        const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-        const idx = Math.round(deg / 45) % 8;
-        document.getElementById('hudCompassDirection').textContent = dirs[idx];
+        rotateCameraBy(e.movementX, e.movementY, sens);
       });
 
       // Shooting & ADS
@@ -1692,23 +1734,137 @@
       document.addEventListener('pointerlockchange', () => {
         const locked = document.pointerLockElement === canvas;
         const banner = document.getElementById('clickLockBanner');
+        if (isTouchDevice()) {
+          banner.classList.add('hidden');
+          return;
+        }
         if (!locked && state.running && !state.matchEnded) {
           banner.classList.remove('hidden');
         } else {
           banner.classList.add('hidden');
         }
       });
+
+      initTouchControls();
     }
 
     function requestCanvasLock() {
+      if (isTouchDevice()) return;
       const canvas = document.getElementById('gameCanvas');
-      canvas.requestPointerLock();
+      if (canvas.requestPointerLock) canvas.requestPointerLock();
+    }
+
+    function initTouchControls() {
+      if (!isTouchDevice()) return;
+      const lookZone = document.getElementById('mobileLookZone');
+      const joystick = document.getElementById('mobileJoystickBase');
+      const stick = document.getElementById('mobileJoystickStick');
+      const fireButton = document.getElementById('mobileFire');
+      const aimButton = document.getElementById('mobileAim');
+      const jumpButton = document.getElementById('mobileJump');
+      const reloadButton = document.getElementById('mobileReload');
+      if (!lookZone || !joystick || !stick || !fireButton || !aimButton || !jumpButton || !reloadButton) return;
+
+      let lookPointer = null;
+      let lookX = 0, lookY = 0;
+      lookZone.addEventListener('pointerdown', event => {
+        if (!state.running || event.pointerType === 'mouse') return;
+        event.preventDefault();
+        lookPointer = event.pointerId;
+        lookX = event.clientX;
+        lookY = event.clientY;
+        lookZone.setPointerCapture(event.pointerId);
+      });
+      lookZone.addEventListener('pointermove', event => {
+        if (lookPointer !== event.pointerId) return;
+        event.preventDefault();
+        const dx = event.clientX - lookX;
+        const dy = event.clientY - lookY;
+        lookX = event.clientX;
+        lookY = event.clientY;
+        rotateCameraBy(dx, dy, state.isAiming ? 0.0018 : 0.0032);
+      });
+      const endLook = event => { if (lookPointer === event.pointerId) lookPointer = null; };
+      lookZone.addEventListener('pointerup', endLook);
+      lookZone.addEventListener('pointercancel', endLook);
+
+      let joystickPointer = null;
+      const updateJoystick = event => {
+        const rect = joystick.getBoundingClientRect();
+        const radius = rect.width * 0.34;
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        let dx = event.clientX - centerX;
+        let dy = event.clientY - centerY;
+        const length = Math.hypot(dx, dy);
+        if (length > radius) { dx = dx / length * radius; dy = dy / length * radius; }
+        stick.style.transform = `translate(${dx}px, ${dy}px)`;
+        state.keys.left = dx < -10;
+        state.keys.right = dx > 10;
+        state.keys.forward = dy < -10;
+        state.keys.backward = dy > 10;
+        state.keys.sprint = dy < -radius * 0.78;
+      };
+      const resetJoystick = () => {
+        joystickPointer = null;
+        stick.style.transform = '';
+        state.keys.forward = state.keys.backward = state.keys.left = state.keys.right = state.keys.sprint = false;
+      };
+      joystick.addEventListener('pointerdown', event => {
+        if (!state.running || event.pointerType === 'mouse') return;
+        event.preventDefault();
+        joystickPointer = event.pointerId;
+        joystick.setPointerCapture(event.pointerId);
+        updateJoystick(event);
+      });
+      joystick.addEventListener('pointermove', event => {
+        if (joystickPointer !== event.pointerId) return;
+        event.preventDefault();
+        updateJoystick(event);
+      });
+      joystick.addEventListener('pointerup', resetJoystick);
+      joystick.addEventListener('pointercancel', resetJoystick);
+
+      fireButton.addEventListener('pointerdown', event => {
+        if (!state.running || event.pointerType === 'mouse') return;
+        event.preventDefault();
+        fireButton.setPointerCapture(event.pointerId);
+        state.touchFiring = true;
+        sound.init();
+        fireEquippedWeapon();
+      });
+      const stopFire = () => { state.touchFiring = false; };
+      fireButton.addEventListener('pointerup', stopFire);
+      fireButton.addEventListener('pointercancel', stopFire);
+
+      aimButton.addEventListener('pointerdown', event => {
+        if (!state.running || event.pointerType === 'mouse') return;
+        event.preventDefault();
+        aimButton.setPointerCapture(event.pointerId);
+        setAimState(true);
+      });
+      const stopAim = event => {
+        if (event.pointerType !== 'mouse') setAimState(false);
+      };
+      aimButton.addEventListener('pointerup', stopAim);
+      aimButton.addEventListener('pointercancel', stopAim);
+
+      jumpButton.addEventListener('pointerdown', event => {
+        if (!state.running || event.pointerType === 'mouse') return;
+        event.preventDefault();
+        if (state.canJump) { state.velocity.y = 8.8; state.canJump = false; }
+      });
+      reloadButton.addEventListener('pointerdown', event => {
+        if (!state.running || event.pointerType === 'mouse') return;
+        event.preventDefault();
+        reloadGun();
+      });
     }
 
     function setAimState(aiming) {
       state.isAiming = aiming;
       const w = WEAPONS[state.activeGunId];
-      const targetFov = aiming ? w.zoomFov : state.baseFov;
+      const targetFov = aiming ? w.zoomFov : effectiveBaseFov();
 
       camera.fov = targetFov;
       camera.updateProjectionMatrix();
@@ -2089,7 +2245,9 @@
 
     function finishMatch() {
       state.matchEnded = true;
-      document.exitPointerLock();
+      state.touchFiring = false;
+      setMobileControlsVisible(false);
+      if (document.exitPointerLock) document.exitPointerLock();
 
       const modal = document.getElementById('gameOverModal');
       const title = document.getElementById('endResultTitle');
@@ -2127,6 +2285,7 @@
     function exitToLobby() {
       document.getElementById('gameOverModal').classList.add('hidden');
       document.getElementById('gameHUD').classList.add('hidden');
+      setMobileControlsVisible(false);
       state.running = false;
       leaveRoom();
     }
@@ -2164,7 +2323,7 @@
       sound.masterVolume = vol / 100;
       state.baseFov = fov;
       if (!state.isAiming) {
-        camera.fov = fov;
+        camera.fov = effectiveBaseFov();
         camera.updateProjectionMatrix();
       }
     }
@@ -2270,6 +2429,8 @@
 
     function leaveRoom() {
       if (state.socket) state.socket.emit('room:leave');
+      setMobileControlsVisible(false);
+      state.touchFiring = false;
       sessionStorage.removeItem('deadshot-room-code');
       document.getElementById('roomLobby').classList.add('hidden');
       document.getElementById('roomLobby').classList.remove('flex');
@@ -2425,6 +2586,7 @@
       }
       state.matchEnded = false;
       state.running = true;
+      setMobileControlsVisible(true);
       state.velocity.set(0, 0, 0);
       document.getElementById('roomLobby').classList.add('hidden');
       document.getElementById('roomLobby').classList.remove('flex');
@@ -2547,6 +2709,7 @@
 
     function onWindowResize() {
       camera.aspect = window.innerWidth / window.innerHeight;
+      if (!state.isAiming) camera.fov = effectiveBaseFov();
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     }
@@ -2609,6 +2772,7 @@
       const delta = Math.min(clock.getDelta(), 0.05);
 
       if (state.running && !state.matchEnded) {
+        if (state.touchFiring && state.health > 0) fireEquippedWeapon();
         const isSprinting = state.keys.sprint && state.keys.forward && !state.isAiming;
         const moveSpeed = isSprinting ? 13.5 : (state.keys.crouch ? 4.8 : 8.2);
 
@@ -2681,7 +2845,8 @@
 
         // Dynamic Field of View transition (Sprint FOV punch / ADS zoom)
         const currentWeapon = WEAPONS[state.activeGunId];
-        const targetFov = state.isAiming ? currentWeapon.zoomFov : (isSprinting ? state.baseFov + 8 : state.baseFov);
+        const baseFov = effectiveBaseFov();
+        const targetFov = state.isAiming ? currentWeapon.zoomFov : (isSprinting ? baseFov + 8 : baseFov);
         camera.fov = THREE.MathUtils.lerp(camera.fov, targetFov, delta * 14.0);
         camera.updateProjectionMatrix();
 
