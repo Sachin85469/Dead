@@ -1435,22 +1435,90 @@
 
       torsoGroup.add(headGroup);
 
-      // Operative 3D Detailed Carbine in Hands
+      // A compact carbine held in front of the chest, facing the operator's +Z front.
       const botGunGroup = new THREE.Group();
-      botGunGroup.position.set(0.22, 0.05, 0.38);
+      botGunGroup.position.set(0, 0.02, 0.34);
 
-      const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.12, 0.54), gearMat);
-      const gunBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.38, 8), gearMat);
+      const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.11, 0.46), gearMat);
+      gunBody.position.z = 0.03;
+      const stock = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.13, 0.24), gearMat);
+      stock.position.set(0, -0.01, -0.30);
+      const gunBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.022, 0.42, 10), gearMat);
       gunBarrel.rotation.x = Math.PI / 2;
-      gunBarrel.position.set(0, 0.02, -0.38);
-      const gunOptic = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.06, 0.12), gearMat);
-      gunOptic.position.set(0, 0.08, -0.05);
+      gunBarrel.position.set(0, 0.015, 0.47);
+      const muzzle = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.024, 0.075, 10), gearMat);
+      muzzle.rotation.x = Math.PI / 2;
+      muzzle.position.set(0, 0.015, 0.72);
+      const magazine = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.22, 0.12), gearMat);
+      magazine.position.set(0, -0.15, 0.04);
+      magazine.rotation.x = -0.08;
+      const gunOptic = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.12, 10), gearMat);
+      gunOptic.rotation.x = Math.PI / 2;
+      gunOptic.position.set(0, 0.095, 0.02);
+      const opticGlass = new THREE.Mesh(new THREE.CylinderGeometry(0.023, 0.023, 0.012, 10), visorMat);
+      opticGlass.rotation.x = Math.PI / 2;
+      opticGlass.position.set(0, 0.095, 0.085);
 
       botGunGroup.add(gunBody);
+      botGunGroup.add(stock);
       botGunGroup.add(gunBarrel);
+      botGunGroup.add(muzzle);
+      botGunGroup.add(magazine);
       botGunGroup.add(gunOptic);
+      botGunGroup.add(opticGlass);
       botGunGroup.castShadow = true;
       torsoGroup.add(botGunGroup);
+
+      // Articulated sleeves and gloved hands make the operator read as a full
+      // person instead of a floating torso carrying a weapon.
+      const worldUp = new THREE.Vector3(0, 1, 0);
+      function addArmSegment(group, start, end, startRadius, endRadius, material) {
+        const from = new THREE.Vector3(...start);
+        const to = new THREE.Vector3(...end);
+        const axis = to.clone().sub(from);
+        const segment = new THREE.Mesh(
+          new THREE.CylinderGeometry(endRadius, startRadius, axis.length(), 12),
+          material
+        );
+        segment.position.copy(from).add(to).multiplyScalar(0.5);
+        segment.quaternion.setFromUnitVectors(worldUp, axis.normalize());
+        segment.castShadow = true;
+        segment.receiveShadow = true;
+        group.add(segment);
+      }
+      function addArm(sign, elbow, wrist) {
+        const arm = new THREE.Group();
+        arm.position.set(sign * 0.34, 0.23, 0.04);
+        const shoulder = new THREE.Mesh(new THREE.SphereGeometry(0.13, 14, 12), uniformMat);
+        shoulder.scale.set(1.05, 1.05, 0.92);
+        shoulder.position.set(0, -0.015, 0.015);
+        shoulder.castShadow = true;
+        arm.add(shoulder);
+        addArmSegment(arm, [0, 0, 0], elbow, 0.12, 0.09, uniformMat);
+
+        const elbowJoint = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 10), uniformMat);
+        elbowJoint.position.set(...elbow);
+        elbowJoint.castShadow = true;
+        arm.add(elbowJoint);
+        const elbowPad = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), gearMat);
+        elbowPad.scale.set(1.05, 0.72, 0.75);
+        elbowPad.position.set(elbow[0], elbow[1], elbow[2] + 0.035);
+        arm.add(elbowPad);
+        addArmSegment(arm, elbow, wrist, 0.09, 0.065, uniformMat);
+
+        const glove = new THREE.Mesh(new THREE.SphereGeometry(0.078, 12, 10), gearMat);
+        glove.scale.set(0.9, 0.75, 1.25);
+        glove.position.set(...wrist);
+        glove.castShadow = true;
+        arm.add(glove);
+        const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.035, 0.09), gearMat);
+        thumb.position.set(wrist[0] + sign * 0.055, wrist[1] - 0.025, wrist[2] + 0.015);
+        arm.add(thumb);
+        torsoGroup.add(arm);
+        return arm;
+      }
+      const leftArm = addArm(-1, [0.08, -0.19, 0.22], [0.23, -0.16, 0.43]);
+      const rightArm = addArm(1, [-0.08, -0.19, 0.16], [-0.22, -0.15, 0.31]);
 
       operator.add(torsoGroup);
 
@@ -1508,6 +1576,8 @@
         root: operator,
         torso: torsoGroup,
         head: headGroup,
+        leftArm,
+        rightArm,
         leftLeg: leftLegGroup,
         rightLeg: rightLegGroup
       };
@@ -2303,10 +2373,11 @@
         player.score = data.score;
         player.isAlive = data.isAlive;
         player.weapon = data.weapon;
-        player.targetPosition = new THREE.Vector3(data.x, 0, data.z);
+        player.targetPosition = new THREE.Vector3(data.x, Math.max(0, data.y - 1.82), data.z);
         player.targetYaw = data.yaw;
-        player.mesh.visible = data.isAlive && data.connected !== false;
-        if (!data.isAlive) player.mesh.rotation.x = -Math.PI / 2.2;
+        player.isCrouched = data.y < 1.5;
+        player.mesh.visible = data.connected !== false;
+        if (!data.isAlive) player.mesh.rotation.x = Math.PI / 2;
         else player.mesh.rotation.x = 0;
       }
       const activeIds = new Set(otherPlayers.map(player => player.id));
@@ -2690,10 +2761,15 @@
           if (!player.targetPosition) return;
           player.mesh.position.lerp(player.targetPosition, Math.min(1, delta * 16));
           player.mesh.rotation.y = player.targetYaw + Math.PI;
+          player.mesh.scale.y = THREE.MathUtils.lerp(player.mesh.scale.y, player.isCrouched ? 0.64 : 1, Math.min(1, delta * 10));
           const moving = player.mesh.position.distanceToSquared(player.targetPosition) > 0.04;
           if (player.rig) {
-            player.rig.leftLeg.rotation.x = moving ? Math.sin(networkNow * 0.012) * 0.4 : 0;
-            player.rig.rightLeg.rotation.x = moving ? -Math.sin(networkNow * 0.012) * 0.4 : 0;
+            const stride = moving && player.isAlive ? Math.sin(networkNow * 0.012) * 0.42 : 0;
+            player.rig.leftLeg.rotation.x = stride;
+            player.rig.rightLeg.rotation.x = -stride;
+            player.rig.leftArm.rotation.x = moving && player.isAlive ? -0.045 + stride * 0.12 : 0;
+            player.rig.rightArm.rotation.x = moving && player.isAlive ? -0.035 - stride * 0.1 : 0;
+            player.rig.torso.rotation.z = moving && player.isAlive ? Math.sin(networkNow * 0.006) * 0.018 : 0;
           }
         });
 

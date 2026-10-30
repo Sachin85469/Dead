@@ -326,8 +326,11 @@ io.on('connection', socket => {
       return { x: d.x / length, y: d.y / length, z: d.z / length };
     });
     if (dirs.some(d => !d)) return;
-    const expected = { x: Math.sin(shooter.yaw) * Math.cos(shooter.pitch), y: -Math.sin(shooter.pitch), z: -Math.cos(shooter.yaw) * Math.cos(shooter.pitch) };
-    const maxSpread = Math.sqrt(2) * gun.spread + 0.035;
+    // THREE cameras look down local -Z. For YXZ camera rotation this is the
+    // world-space forward vector; using the opposite signs rejects valid shots
+    // as soon as a player turns or aims vertically.
+    const expected = { x: -Math.sin(shooter.yaw) * Math.cos(shooter.pitch), y: Math.sin(shooter.pitch), z: -Math.cos(shooter.yaw) * Math.cos(shooter.pitch) };
+    const maxSpread = Math.sqrt(2) * gun.spread + 0.05;
     if (dirs.some(d => d.x * expected.x + d.y * expected.y + d.z * expected.z < Math.cos(maxSpread))) return;
     shooter.lastShotAt = now;
     shooter.ammo--;
@@ -345,12 +348,11 @@ io.on('connection', socket => {
       }
       for (const target of room.players.values()) {
         if (!target.connected || !target.isAlive || target.team === shooter.team || target.id === shooter.id) continue;
-        const box = { min: { x: target.x - 0.38, y: target.y - 1.72, z: target.z - 0.38 }, max: { x: target.x + 0.38, y: target.y - 0.04, z: target.z + 0.38 } };
-        const dist = rayBoxDistance(origin, dir, box);
-        if (dist !== null && dist < closest && dist < nearestWall) {
-          closest = dist; targetHit = target;
-          const hitY = shooter.y - 0.04 + dir.y * dist;
-          headshot = hitY > target.y - 0.56;
+        for (const part of playerHitBoxes(target)) {
+          const dist = rayBoxDistance(origin, dir, part.box);
+          if (dist !== null && dist < closest && dist < nearestWall) {
+            closest = dist; targetHit = target; headshot = part.headshot;
+          }
         }
       }
       if (targetHit) {
@@ -414,6 +416,28 @@ function rayBoxDistance(origin, direction, box) {
     if (tmin > tmax) return null;
   }
   return tmin <= 180 ? tmin : null;
+}
+
+function playerHitBoxes(player) {
+  // Player state stores the camera height; convert it to the operator's feet
+  // so standing, crouched, and airborne players get usable body hit regions.
+  const height = player.y < 1.5 ? 1.15 : 1.82;
+  const feet = Math.max(0, player.y - height);
+  const headBottom = feet + height - 0.52;
+  const torsoBottom = feet + height * 0.42;
+  const torsoTop = feet + height - 0.54;
+  const box = (halfX, minY, maxY, halfZ) => ({
+    min: { x: player.x - halfX, y: minY, z: player.z - halfZ },
+    max: { x: player.x + halfX, y: maxY, z: player.z + halfZ }
+  });
+
+  return [
+    { headshot: true, box: box(0.23, headBottom, feet + height + 0.03, 0.22) },
+    { headshot: false, box: box(0.35, torsoBottom, torsoTop, 0.29) },
+    { headshot: false, box: box(0.52, feet + height * 0.45, feet + height - 0.54, 0.19) },
+    { headshot: false, box: box(0.30, feet + height * 0.22, feet + height * 0.45, 0.25) },
+    { headshot: false, box: box(0.25, feet + 0.04, feet + height * 0.31, 0.23) }
+  ];
 }
 
 function eliminate(room, killer, victim, headshot) {
