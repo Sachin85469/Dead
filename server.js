@@ -165,7 +165,7 @@ io.on('connection', socket => {
     const account = sessionUser(data && data.token);
     const weapon = weapons[data && data.weapon] ? data.weapon : 'rifle';
     const player = { id: socket.id, name: account ? account.name : cleanName(data && data.name), account: account && account.email, team, ready: false,
-      isAlive: true, health: 100, kills: 0, deaths: 0, score: 0, weapon, ...spawnFor(team), yaw: team === 'blue' ? Math.PI : 0, pitch: 0,
+      isAlive: true, health: 100, kills: 0, deaths: 0, score: 0, weapon, ...spawnFor(team), yaw: team === 'blue' ? 0 : Math.PI, pitch: 0,
       lastMoveAt: Date.now(), lastShotAt: 0, ammo: weapons[weapon].magSize, reserve: weapons[weapon].reserve, reloadUntil: 0 };
     room.players.set(socket.id, player);
     socket.data.roomCode = code;
@@ -218,11 +218,11 @@ io.on('connection', socket => {
     const player = room && room.players.get(socket.id);
     if (!room || room.phase !== 'running' || !player || !player.isAlive || !state) return;
     const x = Number(state.x), y = Number(state.y), z = Number(state.z), yaw = Number(state.yaw), pitch = Number(state.pitch);
-    if (![x, y, z, yaw, pitch].every(Number.isFinite) || Math.abs(x) > 82 || Math.abs(z) > 82 || y < 0.8 || y > 12 || blockedPosition(x, y, z)) return;
+    if (![x, y, z, yaw, pitch].every(Number.isFinite) || Math.abs(x) > 82 || Math.abs(z) > 82 || y < 0.8 || y > 4 || blockedPosition(x, y, z)) return;
     const now = Date.now();
     const elapsed = Math.min(250, Math.max(16, now - player.lastMoveAt));
     const distance = Math.hypot(x - player.x, z - player.z);
-    if (distance > 3.5 + elapsed * 0.025) return;
+    if (distance > 0.8 + elapsed * 0.018 || Math.abs(y - player.y) > 0.3 + elapsed * 0.012) return;
     player.x = x; player.y = y; player.z = z;
     player.yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw));
     player.pitch = Math.max(-1.56, Math.min(1.56, pitch));
@@ -232,7 +232,7 @@ io.on('connection', socket => {
   socket.on('weapon:select', weapon => {
     const room = rooms.get(socket.data.roomCode);
     const player = room && room.players.get(socket.id);
-    if (!room || !player || !weapons[weapon]) return;
+    if (!room || !player || !weapons[weapon] || (room.phase === 'running' && player.isAlive)) return;
     player.weapon = weapon;
     player.ammo = weapons[weapon].magSize;
     player.reserve = weapons[weapon].reserve;
@@ -264,6 +264,9 @@ io.on('connection', socket => {
       return { x: d.x / length, y: d.y / length, z: d.z / length };
     });
     if (dirs.some(d => !d)) return;
+    const expected = { x: Math.sin(shooter.yaw) * Math.cos(shooter.pitch), y: -Math.sin(shooter.pitch), z: -Math.cos(shooter.yaw) * Math.cos(shooter.pitch) };
+    const maxSpread = Math.sqrt(2) * gun.spread + 0.035;
+    if (dirs.some(d => d.x * expected.x + d.y * expected.y + d.z * expected.z < Math.cos(maxSpread))) return;
     shooter.lastShotAt = now;
     shooter.ammo--;
     const results = [];

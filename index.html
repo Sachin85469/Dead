@@ -1512,10 +1512,12 @@
 
       document.addEventListener('keydown', (e) => {
         // Allow switching weapons via 1-4 even while eliminated on respawn screen
-        if (e.code === 'Digit1') switchActiveWeapon('rifle');
-        if (e.code === 'Digit2') switchActiveWeapon('sniper');
-        if (e.code === 'Digit3') switchActiveWeapon('shotgun');
-        if (e.code === 'Digit4') switchActiveWeapon('smg');
+        if (e.code.startsWith('Digit') && ['Digit1', 'Digit2', 'Digit3', 'Digit4'].includes(e.code)) {
+          if (!state.running || state.health <= 0) {
+            const guns = { Digit1: 'rifle', Digit2: 'sniper', Digit3: 'shotgun', Digit4: 'smg' };
+            switchActiveWeapon(guns[e.code]);
+          }
+        }
 
         if (!state.running) return;
         switch (e.code) {
@@ -1714,7 +1716,11 @@
           spawnTracer(origin, farPoint);
         }
       }
-      if (state.socket && state.roomPhase === 'running') state.socket.emit('fire:shot', { directions: shotDirections });
+      if (state.socket && state.roomPhase === 'running') {
+        const viewRotation = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+        state.socket.emit('player:state', { x: cameraHolder.position.x, y: cameraHolder.position.y, z: cameraHolder.position.z, yaw: viewRotation.y, pitch: viewRotation.x });
+        state.socket.emit('fire:shot', { directions: shotDirections });
+      }
     }
 
     function ejectBulletShell() {
@@ -1842,7 +1848,9 @@
       document.getElementById('respawnModal').classList.add('hidden');
       state.health = 100;
       updateHealthDisplay();
+      state.suppressWeaponEmit = true;
       switchActiveWeapon(state.activeGunId);
+      state.suppressWeaponEmit = false;
 
       if (position) {
         cameraHolder.position.set(position.x, position.y, position.z);
@@ -2325,7 +2333,9 @@
       document.getElementById('lobbyScreen').classList.add('hidden');
       document.getElementById('gameHUD').classList.remove('hidden');
       updateHealthDisplay();
+      state.suppressWeaponEmit = true;
       switchActiveWeapon(state.activeGunId);
+      state.suppressWeaponEmit = false;
       requestCanvasLock();
     }
 
